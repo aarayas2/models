@@ -7,7 +7,6 @@ import numpy as np
 from policy_network import GridPolicyNetwork
 from nn_grid_atari import GridPong, GridBreakout, GridPacman, GridFreeway
 
-# Automatically select CUDA device if available
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 if device.type == "cuda":
@@ -26,18 +25,26 @@ print("1: Pong\n2: Breakout\n3: Pacman\n4: Freeway")
 choice = input("Choice (1-4) [default: 2]: ").strip() or "2"
 game_name, env_cls, save_filename = games.get(choice, games["2"])
 
-# Headless environment for fast step throughput
 env = env_cls(render_mode=None)
 
-# Send model to selected device (CUDA or CPU)
+# Initialize network and move to device
 policy = GridPolicyNetwork().to(device)
+
+# --- CHECK FOR EXISTING CHECKPOINT ---
+if os.path.exists(save_filename):
+    print(f"\n[+] Found existing checkpoint: '{save_filename}'. Resuming training from saved weights.")
+    state_dict = torch.load(save_filename, map_location=device)
+    policy.load_state_dict(state_dict)
+else:
+    print(f"\n[-] No existing checkpoint found for '{save_filename}'. Starting training from scratch.")
+
 optimizer = optim.Adam(policy.parameters(), lr=1e-3)
 
 GAMMA = 0.99
 NUM_EPISODES = 2000
 MAX_STEPS = 200
 
-print(f"\n--- Training {game_name} for {NUM_EPISODES} episodes on {device} ---")
+print(f"\n--- Training {game_name} for {NUM_EPISODES} additional episodes on {device} ---")
 recent_rewards = []
 
 for episode in range(1, NUM_EPISODES + 1):
@@ -46,20 +53,17 @@ for episode in range(1, NUM_EPISODES + 1):
     rewards = []
 
     for step in range(MAX_STEPS):
-        # Convert observation and send tensor to CUDA
         obs_tensor = torch.tensor(
             obs, dtype=torch.float32, device=device
         ).unsqueeze(0)
         
         logits = policy(obs_tensor)
 
-        # Categorical distribution operates directly on device
         dist = Categorical(logits=logits)
         action = dist.sample()
 
         log_probs.append(dist.log_prob(action))
 
-        # Action is transferred to CPU host for NumPy environment step
         obs, reward, terminated, truncated, _ = env.step(action.item())
         rewards.append(reward)
 
@@ -80,11 +84,10 @@ for episode in range(1, NUM_EPISODES + 1):
 
     returns = torch.tensor(discounted_returns, dtype=torch.float32, device=device)
 
-    # Normalize returns on device for baseline stability
+    # Normalize returns
     if len(returns) > 1 and returns.std() > 1e-7:
         returns = (returns - returns.mean()) / (returns.std() + 1e-8)
 
-    # Calculate policy loss directly on device
     policy_loss = []
     for log_prob, G in zip(log_probs, returns):
         policy_loss.append(-log_prob * G)
@@ -100,6 +103,6 @@ for episode in range(1, NUM_EPISODES + 1):
 
 env.close()
 
-# Save state_dict transferred to CPU so it can be loaded on any hardware
+# Save updated weights (ensuring CPU portability)
 torch.save(policy.to("cpu").state_dict(), save_filename)
-print(f"\nTraining complete! Network saved to: {os.path.abspath(save_filename)}")
+print(f"\nTraining session complete! Updated weights saved to: {os.path.abspath(save_filename)}")
